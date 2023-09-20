@@ -29,13 +29,14 @@ my_recipe <- recipe(count~., data=bike_train) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_time(datetime, features="hour") %>%
+  step_normalize(all_numeric_predictors()) %>%
   step_dummy(all_nominal_predictors()) %>%
-  step_zv(all_predictors())
+  step_zv(all_predictors()) %>%
   step_rm(datetime)
   
 # Baking the recipe
-prepped_recipe <- prep(my_recipe)
-bike_bake <- bake(prepped_recipe, bike_train)
+# prepped_recipe <- prep(my_recipe)
+# bike_bake <- bake(prepped_recipe, bike_train)
 
 
 
@@ -99,9 +100,9 @@ pois_mod <- poisson_reg() %>% #Type of model
   set_engine("glm") # GLM = generalized linear model
 
 bike_pois_workflow <- workflow() %>%
-add_recipe(my_recipe) %>%
-add_model(pois_mod) %>%
-fit(data = bike_train) # Fit the workflow
+  add_recipe(my_recipe) %>%
+  add_model(pois_mod) %>%
+  fit(data = bike_train) # Fit the workflow
 
 bike_predictions_pois <- predict(bike_pois_workflow,
                             new_data=bike_test) # Use fit to predict
@@ -115,3 +116,47 @@ colnames(bike_pois) <- c("datetime", "count")
 bike_pois$datetime <- format(bike_pois$datetime, "%Y-%m-%d %H:%M:%S")
 
 vroom_write(bike_pois, "bike_pois.csv", ",")
+
+############################
+### Penalized Regression ###
+############################
+# With log transformation
+
+preg_model <- linear_reg(penalty=1, mixture=0.5) %>% #Set model and tuning
+  set_engine("glmnet") # Function to fit in R
+
+preg_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(preg_model) %>%
+  fit(data=bike_log)
+
+preg_preds <- predict(preg_wf, new_data=bike_test)%>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=preg_preds, file="./bike_log_preg.csv", delim=",")
+
+
+### Poisson model, penalized regression
+
+preg_pois_mod <- poisson_reg(penalty=0, mixture=0.5) %>% #Type of model
+  set_engine("glm") # GLM = generalized linear model
+
+preg_pois_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(preg_pois_mod) %>%
+  fit(data = bike_log) # Fit the workflow
+
+preg_pois_preds <- predict(preg_pois_wf, new_data=bike_test)%>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=preg_pois_preds, file="./bike_log_preg_pois.csv", delim=",")
