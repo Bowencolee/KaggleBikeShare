@@ -217,3 +217,55 @@ tune_preds <- final_wf %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=tune_preds, file="./bike_tune.csv", delim=",")
+
+
+##### Regression Trees #####
+
+tree_model <- decision_tree(tree_depth = tune(),
+                        cost_complexity = tune(),
+                        min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # Engine = What R function to use
+  set_mode("regression")
+
+## Set Workflow
+tree_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(tree_model)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(tree_depth(),
+                            cost_complexity(),
+                            min_n(),
+                            levels = 5) ## L^2 total tuning possibilities
+
+## Split data for CV
+folds <- vfold_cv(bike_log, v = 5, repeats=2)
+
+## Run the CV
+CV_results <- tree_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+## Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best("rmse")
+
+## Finalize the Workflow & fit it
+final_wf <-tree_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=bike_log)
+
+## Predict
+tree_preds <- final_wf %>%
+  predict(new_data = bike_test) %>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=tree_preds, file="./bike_tree.csv", delim=",")
+
+
