@@ -2,10 +2,11 @@
 ## Bike Share Analysis
 ##
 
-library(tidyverse)
 library(tidymodels)
 library(vroom)
-library(poissonreg)
+#library(rpart) # regression trees
+#library(ranger) # random forests
+
 
 bike_train <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/train.csv")
 bike_test <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/test.csv")
@@ -269,3 +270,51 @@ tree_preds <- final_wf %>%
 vroom_write(x=tree_preds, file="./bike_tree.csv", delim=",")
 
 
+
+##### Random Forests #####
+
+forest_model <- rand_forest(mtry = tune(),
+                      min_n=tune(),
+                      trees=1000) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+## Set Workflow
+forest_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(forest_model)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(mtry(range =c(1,5)),
+                            min_n(),
+                            levels = 5) ## L^2 total tuning possibilities
+
+## Split data for CV
+folds <- vfold_cv(bike_log, v = 5, repeats=1)
+
+## Run the CV
+CV_results <- forest_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+## Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best("rmse")
+
+## Finalize the Workflow & fit it
+final_wf <-forest_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=bike_log)
+
+## Predict
+forest_preds <- final_wf %>%
+  predict(new_data = bike_test) %>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=forest_preds, file="./bike_forest.csv", delim=",")
