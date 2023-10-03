@@ -6,7 +6,9 @@ library(tidymodels)
 library(vroom)
 #library(rpart) # regression trees
 #library(ranger) # random forests
-
+#library(stacks) # model stacking
+#library(glmnet) # penalized regression
+#library(poissonreg) # poisson regresssion
 
 bike_train <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/train.csv")
 bike_test <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/test.csv")
@@ -38,10 +40,6 @@ my_recipe <- recipe(count~., data=bike_log) %>%
 # Baking the recipe
 # prepped_recipe <- prep(my_recipe)
 # bike_bake <- bake(prepped_recipe, bike_train)
-
-
-
-
 
 ##### Linear regression #####
 
@@ -318,3 +316,109 @@ forest_preds <- final_wf %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=forest_preds, file="./bike_forest.csv", delim=",")
+
+##### Model Stacking #####
+## NEED MODEL -> WORKFLOW -> MODEL TUNING GRID -> MODELS FROM WF
+
+folds <- vfold_cv(bike_log, v = 10, repeats=1)
+
+untunedModel <- control_stack_grid() #If tuning over a grid
+tunedModel <- control_stack_resamples() #If not tuning a model
+
+## Penalized regression model
+preg_model <- linear_reg(penalty=tune(),
+                         mixture=tune()) %>% #Set model and tuning
+                set_engine("glmnet") # Function to fit in R
+
+preg_wf <- workflow() %>%
+            add_recipe(my_recipe) %>%
+            add_model(preg_model)
+
+preg_tuning_grid <- grid_regular(penalty(),
+                                 mixture(),
+                                 levels = 6)
+
+preg_models <- preg_wf %>%
+                tune_grid(resamples=folds,
+                          grid=preg_tuning_grid,
+                          metrics=metric_set(rmse, mae, rsq),
+                          control = untunedModel)
+
+## Linear Regression
+
+lin_reg <- linear_reg() %>%
+            set_engine("lm")
+
+lin_reg_wf <- workflow() %>%
+                add_model(lin_reg) %>%
+                add_recipe(my_recipe)
+lin_reg_model <- fit_resamples(lin_reg_wf,
+                               resamples = folds,
+                               control = tunedModel)
+
+## Regression trees
+
+tree_model <- decision_tree(tree_depth = tune(),
+                            cost_complexity = tune(),
+                            min_n=tune()) %>% #Type of model
+  set_engine("rpart") %>% # Engine = What R function to use
+  set_mode("regression")
+
+tree_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(tree_model)
+
+tree_tuning_grid <- grid_regular(tree_depth(),
+                            cost_complexity(),
+                            min_n(),
+                            levels = 6)
+
+tree_models <- tree_wf %>%
+                    tune_grid(resamples=folds,
+                              grid=tree_tuning_grid,
+                              metrics=metric_set(rmse, mae, rsq),
+                              control = untunedModel)
+
+## Random Forests
+
+forest_model <- rand_forest(mtry = tune(),
+                            min_n=tune(),
+                            trees=1000) %>% #Type of model
+  set_engine("ranger") %>% # What R function to use
+  set_mode("regression")
+
+forest_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(forest_model)
+
+forest_tuning_grid <- grid_regular(mtry(range =c(1,5)),
+                            min_n(),
+                            levels = 6)
+
+forest_models <- forest_wf %>%
+                  tune_grid(resamples=folds,
+                            grid=forest_tuning_grid,
+                            metrics=metric_set(rmse, mae, rsq),
+                            control = untunedModel)
+
+## Specify with models to include1
+my_stack <- stacks() %>%
+              add_candidates(preg_models) %>%
+              add_candidates(lin_reg_model) %>%
+              add_candidates(tree_models) %>%
+              add_candidates(forest_models)
+
+stack_mod <- my_stack %>%
+              blend_predictions() %>% # LASSO penalized regression meta-learner
+              fit_members() ## Fit the members to the data
+
+stack_preds <- stack_mod %>%
+  predict(new_data = bike_test) %>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=stack_preds, file="./bike_stack.csv", delim=",")
