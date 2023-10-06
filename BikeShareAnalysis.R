@@ -327,7 +327,7 @@ vroom_write(x=forest_preds, file="./bike_forest.csv", delim=",")
 ##### Model Stacking #####
 ## NEED MODEL -> WORKFLOW -> MODEL TUNING GRID -> MODELS FROM WF
 
-folds <- vfold_cv(bike_log, v = 10, repeats=1)
+folds <- vfold_cv(bike_log, v = 12, repeats=1)
 
 untunedModel <- control_stack_grid() #If tuning over a grid
 tunedModel <- control_stack_resamples() #If not tuning a model
@@ -421,8 +421,8 @@ boost_models <- boost_wf %>%
 my_stack <- stacks() %>%
               add_candidates(preg_models) %>%
               add_candidates(tree_models) %>%
-              add_candidates(forest_models) %>%
-              add_candidates(boost_models)
+              add_candidates(forest_models) #%>%
+              #add_candidates(boost_models)
 
 stack_mod <- my_stack %>%
               blend_predictions() %>% # LASSO penalized regression meta-learner
