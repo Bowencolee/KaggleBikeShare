@@ -4,25 +4,30 @@
 
 library(tidymodels)
 library(vroom)
-#library(rpart) # regression trees
-#library(ranger) # random forests
-#library(stacks) # model stacking
-#library(glmnet) # penalized regression
+library(lubridate)
+library(rpart) # regression trees
+library(ranger) # random forests
+library(stacks) # model stacking
+library(glmnet) # penalized regression
 #library(poissonreg) # poisson regresssion
+library(xgboost) # boosted trees
 
 bike_train <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/train.csv")
-bike_test <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/test.csv")
+bike_test <- vroom::vroom("C:/Users/bowen/Desktop/Stat348/KagglebikeShare/test.csv") %>%
+  mutate(year=year(datetime))
 
+bike_train <- bike_train %>%
+  select(-casual,-registered)
+
+bike_log <- bike_train %>%
+  mutate(count=log(count)) %>%
+  mutate(year=year(datetime))
 
 ####### Cleaning #######
 
 
 # Bike_train w/o casual and registered (bike_log takes the count and logs it)
-bike_train <- bike_train %>%
-  select(-casual,-registered)
 
-bike_log <- bike_train %>%
-  mutate(count=log(count))
 
 # Engineering section ### IF YOU WANT TO DO SOMETHING TO BOTH, DO IT IN RECIPE#
 my_recipe <- recipe(count~., data=bike_log) %>%
@@ -31,15 +36,17 @@ my_recipe <- recipe(count~., data=bike_log) %>%
   step_mutate(season=factor(season, levels=1:4, labels=c("Spring", "Summer", "Fall", "Winter"))) %>%
   step_mutate(holiday=factor(holiday, levels=c(0,1), labels=c("No", "Yes"))) %>%
   step_mutate(workingday=factor(workingday,levels=c(0,1), labels=c("No", "Yes"))) %>%
-  step_time(datetime, features="hour") %>%
+  step_mutate(year=factor(year,levels=c("2011","2012"))) %>%
+  step_time(datetime, features = "hour") %>%
   step_normalize(all_numeric_predictors()) %>%
   step_dummy(all_nominal_predictors()) %>%
+  step_nzv(all_predictors()) %>%
   step_zv(all_predictors()) %>%
   step_rm(datetime)
   
 # Baking the recipe
-# prepped_recipe <- prep(my_recipe)
-# bike_bake <- bake(prepped_recipe, bike_train)
+prepped_recipe <- prep(my_recipe)
+view(bake(prepped_recipe, bike_log))
 
 ##### Linear regression #####
 
@@ -283,12 +290,12 @@ forest_wf <- workflow() %>%
   add_model(forest_model)
 
 ## Grid of values to tune over
-tuning_grid <- grid_regular(mtry(range =c(1,5)),
+tuning_grid <- grid_regular(mtry(range =c(1,7)),
                             min_n(),
-                            levels = 5) ## L^2 total tuning possibilities
+                            levels = 6) ## L^2 total tuning possibilities
 
 ## Split data for CV
-folds <- vfold_cv(bike_log, v = 5, repeats=1)
+folds <- vfold_cv(bike_log, v = 6, repeats=1)
 
 ## Run the CV
 CV_results <- forest_wf %>%
@@ -336,25 +343,13 @@ preg_wf <- workflow() %>%
 
 preg_tuning_grid <- grid_regular(penalty(),
                                  mixture(),
-                                 levels = 6)
+                                 levels = 7)
 
 preg_models <- preg_wf %>%
                 tune_grid(resamples=folds,
                           grid=preg_tuning_grid,
                           metrics=metric_set(rmse, mae, rsq),
                           control = untunedModel)
-
-## Linear Regression
-
-lin_reg <- linear_reg() %>%
-            set_engine("lm")
-
-lin_reg_wf <- workflow() %>%
-                add_model(lin_reg) %>%
-                add_recipe(my_recipe)
-lin_reg_model <- fit_resamples(lin_reg_wf,
-                               resamples = folds,
-                               control = tunedModel)
 
 ## Regression trees
 
@@ -371,7 +366,7 @@ tree_wf <- workflow() %>%
 tree_tuning_grid <- grid_regular(tree_depth(),
                             cost_complexity(),
                             min_n(),
-                            levels = 6)
+                            levels = 7)
 
 tree_models <- tree_wf %>%
                     tune_grid(resamples=folds,
@@ -391,22 +386,43 @@ forest_wf <- workflow() %>%
   add_recipe(my_recipe) %>%
   add_model(forest_model)
 
-forest_tuning_grid <- grid_regular(mtry(range =c(1,5)),
+forest_tuning_grid <- grid_regular(mtry(range =c(1,10)),
                             min_n(),
-                            levels = 6)
+                            levels = 7)
 
 forest_models <- forest_wf %>%
                   tune_grid(resamples=folds,
                             grid=forest_tuning_grid,
                             metrics=metric_set(rmse, mae, rsq),
                             control = untunedModel)
+## Boosted trees
+
+boost_model <- boost_tree(mtry = tune(),
+                            min_n=tune(),
+                            trees=1000) %>% #Type of model
+  set_engine("xgboost") %>% # What R function to use
+  set_mode("regression")
+
+boost_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(boost_model)
+
+boost_tuning_grid <- grid_regular(mtry(range =c(1,10)),
+                                   min_n(),
+                                   levels = 7)
+
+boost_models <- boost_wf %>%
+  tune_grid(resamples=folds,
+            grid=boost_tuning_grid,
+            metrics=metric_set(rmse, mae, rsq),
+            control = untunedModel)
 
 ## Specify with models to include1
 my_stack <- stacks() %>%
               add_candidates(preg_models) %>%
-              add_candidates(lin_reg_model) %>%
               add_candidates(tree_models) %>%
-              add_candidates(forest_models)
+              add_candidates(forest_models) %>%
+              add_candidates(boost_models)
 
 stack_mod <- my_stack %>%
               blend_predictions() %>% # LASSO penalized regression meta-learner
@@ -422,3 +438,52 @@ stack_preds <- stack_mod %>%
   mutate(datetime=as.character(format(datetime)))
 
 vroom_write(x=stack_preds, file="./bike_stack.csv", delim=",")
+
+
+
+##### Boosted trees #####
+boost_model <- boost_tree(mtry = tune(),
+                            min_n=tune(),
+                            trees=1000) %>% #Type of model
+  set_engine("xgboost") %>% # What R function to use
+  set_mode("regression")
+
+## Set Workflow
+boost_wf <- workflow() %>%
+  add_recipe(my_recipe) %>%
+  add_model(boost_model)
+
+## Grid of values to tune over
+tuning_grid <- grid_regular(mtry(range =c(1,10)),
+                            min_n(),
+                            levels = 5) ## L^2 total tuning possibilities
+
+## Split data for CV
+folds <- vfold_cv(bike_log, v = 10, repeats=1)
+
+## Run the CV
+CV_results <- boost_wf %>%
+  tune_grid(resamples=folds,
+            grid=tuning_grid,
+            metrics=metric_set(rmse, mae, rsq)) #Or leave metrics NULL
+
+## Find Best Tuning Parameters
+bestTune <- CV_results %>%
+  select_best("rmse")
+
+## Finalize the Workflow & fit it
+final_wf <-boost_wf %>%
+  finalize_workflow(bestTune) %>%
+  fit(data=bike_log)
+
+## Predict
+boost_preds <- final_wf %>%
+  predict(new_data = bike_test) %>% 
+  mutate(.pred=exp(.pred)) %>% 
+  bind_cols(., bike_test) %>% 
+  select(datetime, .pred) %>% 
+  rename(count=.pred) %>% 
+  mutate(count=pmax(0, count)) %>% 
+  mutate(datetime=as.character(format(datetime)))
+
+vroom_write(x=boost_preds, file="./bike_boost.csv", delim=",")
